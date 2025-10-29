@@ -6,6 +6,7 @@ from timm.models.layers import DropPath, trunc_normal_
 import numpy as np
 from .build import MODELS
 from utils import misc
+from utils.loss_utils import classification_triplet_loss
 from utils.checkpoint import get_missing_parameters_message, get_unexpected_parameters_message
 from utils.logger import *
 import random
@@ -534,12 +535,25 @@ class PointTransformer(nn.Module):
 
     def build_loss_func(self):
         self.loss_ce = nn.NLLLoss()
+        self.triplet_margin = self.config.get('triplet_margin', 0.3)
+        self.triplet_weight = self.config.get('triplet_weight', 1.0)
+        self.ce_weight = self.config.get('ce_weight', 1.0)
+        self.normalize_triplet = self.config.get('normalize_triplet_feature', True)
 
-    def get_loss_acc(self, ret, gt):
-        loss = self.loss_ce(ret, gt.long())
+    def get_loss_acc(self, ret, gt, features=None):
+        total_loss, _, _ = classification_triplet_loss(
+            ret,
+            gt,
+            self.loss_ce,
+            features=features,
+            margin=self.triplet_margin,
+            ce_weight=self.ce_weight,
+            triplet_weight=self.triplet_weight,
+            normalize_triplet=self.normalize_triplet,
+        )
         pred = ret.argmax(-1)
         acc = (pred == gt).sum() / float(gt.size(0))
-        return loss, acc * 100
+        return total_loss, acc * 100
 
     def load_model_from_ckpt(self, bert_ckpt_path):
         if bert_ckpt_path is not None:
@@ -621,14 +635,9 @@ class PointTransformer(nn.Module):
 
         log_softmax_out = F.log_softmax(logits, dim=-1)
 
-        # if return_features:
-        #     # ReID 평가 시 (Step 4에서 사용): (소프트맥스, 피처) 튜플 반환
-        #     return log_softmax_out, features
-        # else:
-        #     # 기본(기존 Classification) 동작: 소프트맥스 결과만 반환
-        #     return log_softmax_out
-        
-        return log_softmax_out, features
+        if return_features:
+            return log_softmax_out, features
+        return log_softmax_out
 
 
 @MODELS.register_module()
@@ -682,6 +691,10 @@ class DGCNN_ReID(nn.Module):
 
     def build_loss_func(self):
         self.loss_ce = nn.NLLLoss()
+        self.triplet_margin = self.config.get('triplet_margin', 0.3)
+        self.triplet_weight = self.config.get('triplet_weight', 1.0)
+        self.ce_weight = self.config.get('ce_weight', 1.0)
+        self.normalize_triplet = self.config.get('normalize_triplet_feature', True)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -704,12 +717,20 @@ class DGCNN_ReID(nn.Module):
              print_log('DGCNN_ReID: Training from scratch!!!', logger='DGCNN_ReID')
         self.apply(self._init_weights)
 
-    def get_loss_acc(self, ret, gt):
-        # PointTransformer와 동일
-        loss = self.loss_ce(ret, gt.long())
+    def get_loss_acc(self, ret, gt, features=None):
+        total_loss, _, _ = classification_triplet_loss(
+            ret,
+            gt,
+            self.loss_ce,
+            features=features,
+            margin=self.triplet_margin,
+            ce_weight=self.ce_weight,
+            triplet_weight=self.triplet_weight,
+            normalize_triplet=self.normalize_triplet,
+        )
         pred = ret.argmax(-1)
         acc = (pred == gt).sum() / float(gt.size(0))
-        return loss, acc * 100
+        return total_loss, acc * 100
 
     def forward(self, pts, return_features=False):
         # --- DGCNN 백본 ---
@@ -752,7 +773,9 @@ class DGCNN_ReID(nn.Module):
 
         log_softmax_out = F.log_softmax(logits, dim=-1)
 
-        return log_softmax_out, features
+        if return_features:
+            return log_softmax_out, features
+        return log_softmax_out
     
 class PointNetSetAbstraction(nn.Module):
     def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all):
@@ -879,6 +902,10 @@ class PointNet2_ReID(nn.Module):
 
     def build_loss_func(self):
         self.loss_ce = nn.NLLLoss()
+        self.triplet_margin = self.config.get('triplet_margin', 0.3)
+        self.triplet_weight = self.config.get('triplet_weight', 1.0)
+        self.ce_weight = self.config.get('ce_weight', 1.0)
+        self.normalize_triplet = self.config.get('normalize_triplet_feature', True)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -901,12 +928,20 @@ class PointNet2_ReID(nn.Module):
              print_log('PointNet2_ReID: Training from scratch!!!', logger='PointNet2_ReID')
         self.apply(self._init_weights)
 
-    def get_loss_acc(self, ret, gt):
-        # PointTransformer와 동일
-        loss = self.loss_ce(ret, gt.long())
+    def get_loss_acc(self, ret, gt, features=None):
+        total_loss, _, _ = classification_triplet_loss(
+            ret,
+            gt,
+            self.loss_ce,
+            features=features,
+            margin=self.triplet_margin,
+            ce_weight=self.ce_weight,
+            triplet_weight=self.triplet_weight,
+            normalize_triplet=self.normalize_triplet,
+        )
         pred = ret.argmax(-1)
         acc = (pred == gt).sum() / float(gt.size(0))
-        return loss, acc * 100
+        return total_loss, acc * 100
 
     def forward(self, pts, return_features=False):
         # --- PointNet++ 백본 ---
@@ -941,4 +976,6 @@ class PointNet2_ReID(nn.Module):
 
         log_softmax_out = F.log_softmax(logits, dim=-1)
 
-        return log_softmax_out, features
+        if return_features:
+            return log_softmax_out, features
+        return log_softmax_out

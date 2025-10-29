@@ -16,6 +16,7 @@ from utils.checkpoint import get_missing_parameters_message, get_unexpected_para
 from utils.logger import print_log
 import torch.nn.functional as F # forward에서 사용
 from pointnet2_ops import pointnet2_utils
+from utils.loss_utils import classification_triplet_loss
 
 def knn(x, k):
     inner = -2*torch.matmul(x.transpose(2, 1), x)
@@ -649,7 +650,147 @@ class Point_PCP_MAE_Pretrain(nn.Module): # 클래스 이름은 그대로 사용
 
         # 최종 손실 반환
         total_loss = loss_recon + self.center_loss_weight * loss_center
-        
+
         return total_loss # , {"total_loss": total_loss, "recon_loss": loss_recon, "center_loss": self.center_loss_weight * loss_center}
         # 참고: 훈련 루프가 dict를 처리할 수 있다면, 주석 처리된 dict를 반환하여 두 손실을 개별적으로 로깅하는 것이 좋습니다.
         # 훈련 루프가 단일 텐서만 받는다면, 지금처럼 total_loss만 반환합니다.
+
+
+@MODELS.register_module()
+class Point_PCP_MAE_ReID(nn.Module):
+    """Re-identification model that reuses the PCP-MAE encoder."""
+
+    def __init__(self, config):
+        super().__init__()
+        print_log('[Point_PCP_MAE_ReID] Initialising PCP-MAE encoder for ReID.', logger='Point_PCP_MAE_ReID')
+        self.config = config
+
+        self.trans_dim = config.trans_dim
+        self.depth = config.depth
+        self.drop_path_rate = config.drop_path_rate
+        self.num_heads = config.num_heads
+        self.group_size = config.group_size
+        self.num_group = config.num_group
+        self.encoder_dims = getattr(config, 'encoder_dims', self.trans_dim)
+        self.cls_dim = config.cls_dim
+
+        self.group_divider = Group(num_group=self.num_group, group_size=self.group_size)
+        self.encoder = Encoder(encoder_channel=self.encoder_dims)
+        self.patch_embed = nn.Linear(self.encoder_dims, self.trans_dim)
+
+        self.pos_embed = nn.Sequential(
+            nn.Linear(3, 128),
+            nn.GELU(),
+            nn.Linear(128, self.trans_dim),
+        )
+
+        dpr = [x.item() for x in torch.linspace(0, self.drop_path_rate, self.depth)]
+        self.MAE_encoder = TransformerEncoder(
+            embed_dim=self.trans_dim,
+            depth=self.depth,
+            drop_path_rate=dpr,
+            num_heads=self.num_heads,
+            qkv_bias=getattr(config, 'qkv_bias', False),
+            qk_scale=getattr(config, 'qk_scale', None),
+            attn_drop_rate=getattr(config, 'attn_drop_rate', 0.0),
+            drop_rate=getattr(config, 'drop_rate', 0.0),
+        )
+        self.norm = nn.LayerNorm(self.trans_dim)
+
+        self.cls_head_finetune = nn.Sequential(
+            nn.Linear(self.trans_dim * 2, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(256, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(256, self.cls_dim),
+        )
+
+        self.build_loss_func()
+        self.cls_head_finetune.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.BatchNorm1d):
+            nn.init.constant_(m.weight, 1.0)
+            nn.init.constant_(m.bias, 0.0)
+
+    def build_loss_func(self):
+        self.loss_ce = nn.NLLLoss()
+        self.triplet_margin = self.config.get('triplet_margin', 0.3)
+        self.triplet_weight = self.config.get('triplet_weight', 1.0)
+        self.ce_weight = self.config.get('ce_weight', 1.0)
+        self.normalize_triplet = self.config.get('normalize_triplet_feature', True)
+
+    def get_loss_acc(self, ret, gt, features=None):
+        total_loss, _, _ = classification_triplet_loss(
+            ret,
+            gt,
+            self.loss_ce,
+            features=features,
+            margin=self.triplet_margin,
+            ce_weight=self.ce_weight,
+            triplet_weight=self.triplet_weight,
+            normalize_triplet=self.normalize_triplet,
+        )
+        pred = ret.argmax(-1)
+        acc = (pred == gt).sum() / float(gt.size(0))
+        return total_loss, acc * 100
+
+    def load_model_from_ckpt(self, ckpt_path):
+        if ckpt_path is None:
+            print_log('Point_PCP_MAE_ReID: training from scratch.', logger='Point_PCP_MAE_ReID')
+            return
+
+        state_dict = torch.load(ckpt_path, map_location='cpu')
+        ckpt_key = 'base_model' if 'base_model' in state_dict else 'model'
+        pretrained = state_dict.get(ckpt_key, state_dict)
+        pretrained = {k.replace('module.', ''): v for k, v in pretrained.items()}
+
+        removable = [k for k in pretrained if k.startswith('cls_head_finetune')]
+        for key in removable:
+            del pretrained[key]
+
+        incompatible = self.load_state_dict(pretrained, strict=False)
+        if incompatible.missing_keys:
+            print_log(
+                get_missing_parameters_message(incompatible.missing_keys),
+                logger='Point_PCP_MAE_ReID',
+            )
+        if incompatible.unexpected_keys:
+            print_log(
+                get_unexpected_parameters_message(incompatible.unexpected_keys),
+                logger='Point_PCP_MAE_ReID',
+            )
+
+        print_log(f'Point_PCP_MAE_ReID: loaded pretrain weights from {ckpt_path}', logger='Point_PCP_MAE_ReID')
+
+    def forward(self, pts, return_features=False):
+        neighborhood, center = self.group_divider(pts)
+        patch_tokens = self.encoder(neighborhood)
+        patch_tokens = self.patch_embed(patch_tokens)
+        pos = self.pos_embed(center)
+
+        x = self.MAE_encoder(patch_tokens, pos)
+        x = self.norm(x)
+
+        concat_f = torch.cat([x.mean(1), x.max(1)[0]], dim=-1)
+
+        try:
+            features = self.cls_head_finetune[:-1](concat_f)
+            logits = self.cls_head_finetune[-1](features)
+        except Exception as exc:
+            print(f'Warning: Point_PCP_MAE_ReID feature extraction failed. {exc}')
+            logits = self.cls_head_finetune(concat_f)
+            features = concat_f
+
+        log_softmax_out = F.log_softmax(logits, dim=-1)
+        if return_features:
+            return log_softmax_out, features
+        return log_softmax_out

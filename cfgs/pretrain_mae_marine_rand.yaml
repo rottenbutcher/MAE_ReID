@@ -1,4 +1,5 @@
-# cfgs/pretrain_mae_marine.yaml
+# cfgs/pretrain_mae_marine_rand.yaml
+# 랜덤 마스킹 Point-MAE 사전학습 설정 (뷰 기반 대비 베이스라인)
 optimizer : {
   type: AdamW,
   kwargs: {
@@ -26,10 +27,9 @@ model : {
   num_group: 256,
   loss: cdl2,
   transformer_config: {
-    mask_type: 'viewpoint',    # 선호하는 뷰 기반 마스킹
-    mask_ratio: 0.7,           # 최종 마스킹 비율 (Viewpoint + Random)
-    viewpoint_mask_ratio: 0.5, # Viewpoint로 가릴 비율
-    # random_mask_ratio는 mask_ratio와 viewpoint_mask_ratio에 의해 자동 계산됨
+    mask_type: 'rand',
+    mask_ratio: 0.7,
+    viewpoint_mask_ratio: 0.5,
     trans_dim: 384,
     encoder_dims: 384,
     depth: 12,
@@ -41,6 +41,6 @@ model : {
   }
 
 npoints: 8192
-total_bs : 64 # 8192 포인트는 메모리를 더 많이 사용하므로 배치 사이즈를 줄이는 것을 권장합니다.
+total_bs : 64
 step_per_update : 1
 max_epoch : 200

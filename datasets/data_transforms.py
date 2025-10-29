@@ -120,70 +120,74 @@ class RandomHorizontalFlip(object):
 
 
 class PointcloudViewpointMasking(object):
+    """Viewpoint-aware masking that operates on a single point cloud tensor."""
+
     def __init__(self, viewpoint_mask_ratio=0.5, random_mask_ratio=0.4):
         self.viewpoint_mask_ratio = viewpoint_mask_ratio
         self.random_mask_ratio = random_mask_ratio
 
     def generate_mask_single(self, points):
-        """
-        Generates a viewpoint-based boolean mask for a single point cloud.
-        Input: points (N, 3) tensor
-        Output: mask (N,) boolean tensor (True means masked)
-        """
-        N, _ = points.shape
+        """Return a boolean mask that hides viewpoint-aligned points."""
 
-        # --- Viewpoint Generation ---
+        if points.dim() != 2 or points.size(1) < 3:
+            raise ValueError(
+                "PointcloudViewpointMasking expects a (N, 3+) point tensor; "
+                f"got shape {tuple(points.shape)}."
+            )
+
+        N = points.size(0)
+
         elevation_angle = torch.tensor(0.0, device=points.device, dtype=points.dtype)
         while True:
             azimuth_angle_deg = torch.FloatTensor(1).uniform_(0, 360)
-            if not ((azimuth_angle_deg >= 70 and azimuth_angle_deg <= 110) or \
-                    (azimuth_angle_deg >= 250 and azimuth_angle_deg <= 290)):
+            if not ((70 <= azimuth_angle_deg <= 110) or (250 <= azimuth_angle_deg <= 290)):
                 break
         azimuth_angle = torch.deg2rad(azimuth_angle_deg).to(points.device)
         xz_proj = torch.cos(elevation_angle)
-        x = xz_proj * torch.cos(azimuth_angle)
-        y = torch.sin(elevation_angle)
-        z = xz_proj * torch.sin(azimuth_angle)
-        viewpoint = torch.tensor([x, y, z], device=points.device, dtype=points.dtype).squeeze().unsqueeze(0) # (1, 3)
+        viewpoint = torch.stack(
+            [xz_proj * torch.cos(azimuth_angle), torch.sin(elevation_angle), xz_proj * torch.sin(azimuth_angle)],
+            dim=0,
+        ).to(points.device, dtype=points.dtype)
 
-        # --- Masking ---
         centered_points = points - points.mean(dim=0, keepdim=True)
-        dot_product = torch.sum(centered_points * viewpoint, dim=-1) # (N,)
+        dot_product = torch.sum(centered_points * viewpoint.unsqueeze(0), dim=-1)
 
         num_viewpoint_masked = int(N * self.viewpoint_mask_ratio)
         sorted_indices = torch.argsort(dot_product)
-        viewpoint_masked_indices = sorted_indices[:num_viewpoint_masked]
         viewpoint_mask = torch.zeros(N, dtype=torch.bool, device=points.device)
-        viewpoint_mask[viewpoint_masked_indices] = True
+        viewpoint_mask[sorted_indices[:num_viewpoint_masked]] = True
 
         visible_indices = sorted_indices[num_viewpoint_masked:]
-        num_remaining = N - num_viewpoint_masked
+        num_remaining = max(visible_indices.numel(), 0)
         num_random_masked = int(num_remaining * self.random_mask_ratio)
         random_mask = torch.zeros(N, dtype=torch.bool, device=points.device)
         if num_remaining > 0 and num_random_masked > 0:
-             shuffled_visible_indices = visible_indices[torch.randperm(num_remaining, device=points.device)]
-             random_masked_indices = shuffled_visible_indices[:num_random_masked]
-             random_mask[random_masked_indices] = True
+            shuffled_visible = visible_indices[torch.randperm(num_remaining, device=points.device)]
+            random_mask[shuffled_visible[:num_random_masked]] = True
 
-        final_mask_single = viewpoint_mask | random_mask
-        return final_mask_single # Should return (N,) boolean tensor
+        return viewpoint_mask | random_mask
 
-    # --- Original __call__ method (kept for compatibility) ---
-    def __call__(self, pc):
+    def __call__(self, pc, return_mask=False):
+        """Mask an input batch of point clouds.
+
+        Args:
+            pc: Tensor shaped (B, N, C).
+            return_mask: if True, also return the boolean mask for each sample.
+        """
+
+        if pc.dim() != 3:
+            raise ValueError(
+                "PointcloudViewpointMasking expects a (B, N, C) tensor; "
+                f"got shape {tuple(pc.shape)}."
+            )
+
         B, N, _ = pc.shape
-        final_mask_batch = torch.zeros(B, N, dtype=torch.bool, device=pc.device)
-        for i in range(B):
-            # Calls the method defined above
-            final_mask_batch[i] = self.generate_mask_single(pc[i])
+        masks = torch.zeros(B, N, dtype=torch.bool, device=pc.device)
         masked_pc = pc.clone()
-        masked_pc[final_mask_batch] = 0.0
-        return masked_pc
+        for i in range(B):
+            masks[i] = self.generate_mask_single(pc[i])
+            masked_pc[i][masks[i]] = 0.0
 
-# --- Helper function (should be OUTSIDE the class) ---
-def generate_two_viewpoint_masks(points_tensor, viewpoint_mask_ratio=0.5, random_mask_ratio=0.4):
-    masker = PointcloudViewpointMasking(viewpoint_mask_ratio, random_mask_ratio)
-    # This line causes the error if generate_mask_single is not defined correctly in the class
-    mask1 = masker.generate_mask_single(points_tensor)
-    masker = PointcloudViewpointMasking(viewpoint_mask_ratio, random_mask_ratio)
-    mask2 = masker.generate_mask_single(points_tensor)
-    return mask1, mask2
+        if return_mask:
+            return masked_pc, masks
+        return masked_pc

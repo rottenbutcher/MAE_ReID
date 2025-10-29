@@ -93,11 +93,6 @@ def run_net(args, config, train_writer=None, val_writer=None):
     if args.resume:
         builder.resume_optimizer(optimizer, args, logger = logger)
 
-    is_cross_view = config.dataset.train.others.get('cross_view_pretrain', False)
-    if is_cross_view:
-        print_log('CrossView pre-training mode enabled in runner.', logger=logger)
-    # ★★★ 수정 끝 ★★★
-
     # trainval
     # training
     base_model.zero_grad()
@@ -123,39 +118,19 @@ def run_net(args, config, train_writer=None, val_writer=None):
             data_time.update(time.time() - batch_start_time)
             npoints = config.dataset.train.others.npoints
             dataset_name = config.dataset.train._base_.NAME
-            if is_cross_view:
-                # CrossView: Unpack (points, mask1, mask2, label)
-                points = data_tuple[0].cuda()
-                mask_view1 = data_tuple[1].cuda()
-                mask_view2 = data_tuple[2].cuda()
-                # label = data_tuple[3].cuda() # Label not typically needed for MAE pre-train
-            else:
-                # Original Point-MAE: Unpack (points, label)
-                points = data_tuple[0].cuda()
-                # label = data_tuple[1].cuda()
+            points = data_tuple[0].cuda()
 
-                # --- Handle different dataset structures if necessary ---
-                # This part might need adjustment based on how non-SimulationShip datasets return data
-                npoints = config.dataset.train.others.npoints
-                dataset_name = config.dataset.train._base_.NAME
-                if dataset_name == 'ModelNet': # Example for ModelNet
-                     points = misc.fps(points, npoints)
-                # Note: The original code had specific handling for ShapeNet/ModelNet.
-                # Ensure 'points' is correctly assigned for non-CrossView case.
-                # The code here assumes data_tuple[0] is always the points tensor
-                # for the non-cross-view case, which seems consistent with original logic.
+            # --- Handle different dataset structures if necessary ---
+            npoints = config.dataset.train.others.npoints
+            if dataset_name == 'ModelNet':  # Example for ModelNet
+                points = misc.fps(points, npoints)
 
             # Apply augmentations AFTER potentially generating masks in dataset
             # (Check if this is the desired order)
             points = train_transforms(points)
 
             # ★★★ [수정 3/3] Call model forward pass accordingly ★★★
-            if is_cross_view:
-                # Use POSITIONAL arguments for DataParallel compatibility
-                loss_tuple = base_model(points, mask_view1, mask_view2) # <-- Fixed line
-            else:
-                # Original Point-MAE call
-                loss_tuple = base_model(points)
+            loss_tuple = base_model(points)
             
             # Check if model output is a tuple/list (multi-GPU) or a single tensor
             if isinstance(loss_tuple, (list, tuple)):
