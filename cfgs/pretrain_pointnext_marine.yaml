@@ -1,0 +1,41 @@
+optimizer : {
+  type: AdamW,
+  kwargs: {
+  lr : 0.0005,  # 'from scratch' 학습이므로 0.0005 사용
+  weight_decay : 0.05
+}}
+
+scheduler: {
+  type: CosLR,
+  kwargs: {
+    epochs: 200, # 사전학습 에폭
+    initial_epochs : 10
+}}
+
+dataset : {
+  # [!!!] 데이터셋을 Simulation_Ship으로 설정
+  train : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
+            others: {subset: 'train', npoints: 8192}},
+  val : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
+            others: {subset: 'test', npoints: 8192}},
+}
+
+model : {
+  # [!!!] 모델을 PointNet2_ReID로 설정
+  NAME: PointNet2_ReID,
+  
+  # (PointNet2 모델 파라미터)
+  pointnext_output_dim: 1024, 
+
+  # [!!!] cls_dim을 Simulation_Ship의 클래스 개수(e.g., 786)로 설정
+  cls_dim: 786, 
+}
+
+npoints: 8192
+total_bs : 32
+step_per_update : 1
+max_epoch : 200
+grad_norm_clip: 10
+
+# [!!!] main.py가 runner.py를 호출하도록 'reid' 태스크로 설정
+task: 'reid'

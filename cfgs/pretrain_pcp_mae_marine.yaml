@@ -1,0 +1,46 @@
+optimizer : {
+  type: AdamW,
+  kwargs: {
+  lr : 0.001,
+  weight_decay : 0.05
+}}
+
+scheduler: {
+  type: CosLR,
+  kwargs: {
+    epochs: 200,
+    initial_epochs : 10
+}}
+
+dataset : {
+  train : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
+            others: {subset: 'train', npoints: 8192}},
+  val : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
+          others: {subset: 'test', npoints: 8192}},
+  }
+
+# --- 모델 섹션 수정 ---
+model : {
+  NAME: Point_PCP_MAE_Pretrain,   # 사용할 모델 클래스 이름 (수정됨)
+  group_size: 32,                 # 패치(그룹) 당 포인트 수
+  num_group: 256,                 # 패치(그룹) 개수
+  loss: cdl2,                     # 재구성 손실 함수 (Chamfer Distance L2)
+
+  # --- transformer_config 내용을 model 바로 아래로 이동 ---
+  mask_ratio: 0.7,                # 마스킹할 패치의 비율
+  trans_dim: 384,                 # Transformer 임베딩 차원
+  encoder_dims: 384,              # 패치 인코더 출력 차원 (보통 trans_dim과 동일하게 설정)
+  depth: 12,                      # MAE Encoder (Transformer) 깊이
+  drop_path_rate: 0.1,
+  num_heads: 6,                   # MAE Encoder의 Multi-head Attention 헤드 수
+  decoder_depth: 4,               # MAE Decoder 깊이
+  decoder_num_heads: 6,           # MAE Decoder의 Multi-head Attention 헤드 수
+  use_patch_embed: True
+
+} # --- 모델 섹션 끝 ---
+
+# --- 나머지 설정 ---
+npoints: 8192                     # 입력 포인트 수
+total_bs : 64                     # 전체 배치 사이즈
+step_per_update : 1
+max_epoch : 200

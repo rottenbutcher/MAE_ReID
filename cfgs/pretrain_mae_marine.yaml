@@ -1,0 +1,47 @@
+# cfgs/pretrain_mae_marine.yaml
+optimizer : {
+  type: AdamW,
+  kwargs: {
+  lr : 0.001,
+  weight_decay : 0.05
+}}
+
+scheduler: {
+  type: CosLR,
+  kwargs: {
+    epochs: 200,
+    initial_epochs : 10
+}}
+
+dataset : {
+  train : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
+            others: {subset: 'train', npoints: 8192}},
+  val : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
+            others: {subset: 'test', npoints: 8192}},
+  }
+
+model : {
+  NAME: Point_MAE,
+  group_size: 32,
+  num_group: 256,
+  loss: cdl2,
+  transformer_config: {
+    # mask_type: 'viewpoint',
+    mask_type: 'rand',    # 'viewpoint'로 설정
+    mask_ratio: 0.7,           # 최종 마스킹 비율 (Viewpoint + Random)
+    viewpoint_mask_ratio: 0.5, # Viewpoint로 가릴 비율
+    # random_mask_ratio는 mask_ratio와 viewpoint_mask_ratio에 의해 자동 계산됨
+    trans_dim: 384,
+    encoder_dims: 384,
+    depth: 12,
+    drop_path_rate: 0.1,
+    num_heads: 6,
+    decoder_depth: 4,
+    decoder_num_heads: 6,
+  },
+  }
+
+npoints: 8192
+total_bs : 64 # 8192 포인트는 메모리를 더 많이 사용하므로 배치 사이즈를 줄이는 것을 권장합니다.
+step_per_update : 1
+max_epoch : 200
