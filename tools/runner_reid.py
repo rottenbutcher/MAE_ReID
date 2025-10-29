@@ -1,10 +1,13 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tools import builder
 from utils import misc, dist_utils
 import time
 from utils.logger import *
 from utils.AverageMeter import AverageMeter
+import json
+from pathlib import Path
 
 import numpy as np
 from datasets import data_transforms
@@ -38,18 +41,56 @@ test_transforms = transforms.Compose(
 )
 
 
+def _update_reid_metrics_file(experiment_path, epoch, rank1, rank5, mAP, is_best=False):
+    """Persist validation metrics so external tools can read them."""
+
+    exp_dir = Path(experiment_path)
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = exp_dir / 'reid_metrics.json'
+
+    payload = {"history": []}
+    if summary_path.exists():
+        try:
+            payload = json.loads(summary_path.read_text())
+        except json.JSONDecodeError:
+            payload = {"history": []}
+
+    payload.setdefault("history", [])
+    payload["history"].append({
+        "epoch": int(epoch),
+        "rank1": float(rank1),
+        "rank5": float(rank5),
+        "mAP": float(mAP),
+        "is_best": bool(is_best),
+        "timestamp": time.time(),
+    })
+
+    if is_best or "best" not in payload:
+        payload["best"] = {
+            "epoch": int(epoch),
+            "rank1": float(rank1),
+            "rank5": float(rank5),
+            "mAP": float(mAP),
+        }
+
+    summary_path.write_text(json.dumps(payload, indent=2))
+
+
 # --- [REID] Acc_Metric 클래스를 mAP와 Rank-1을 저장하도록 수정 ---
 class Acc_Metric:
-    def __init__(self, mAP=0., rank1=0.):
+    def __init__(self, mAP=0., rank1=0., rank5=0.):
         if type(mAP).__name__ == 'dict':
             self.mAP = mAP.get('mAP', 0.)
             self.rank1 = mAP.get('rank1', 0.)
+            self.rank5 = mAP.get('rank5', 0.)
         elif type(mAP).__name__ == 'Acc_Metric':
             self.mAP = mAP.mAP
             self.rank1 = mAP.rank1
+            self.rank5 = mAP.rank5
         else:
             self.mAP = mAP
             self.rank1 = rank1
+            self.rank5 = rank5
 
     def better_than(self, other):
         # Rank-1 정확도를 우선 기준으로 비교
@@ -62,7 +103,7 @@ class Acc_Metric:
             return False
 
     def state_dict(self):
-        return {'mAP': self.mAP, 'rank1': self.rank1}
+        return {'mAP': self.mAP, 'rank1': self.rank1, 'rank5': self.rank5}
 # --- [REID] 수정 끝 ---
 
 
@@ -75,6 +116,7 @@ def calculate_reid_metrics(all_features, all_labels):
     """
     # GPU를 사용하여 거리 계산 가속
     all_features = all_features.cuda()
+    all_features = F.normalize(all_features, p=2, dim=1)
     all_labels = all_labels.cuda()
     
     N = all_features.size(0)
@@ -241,9 +283,14 @@ def run_net(args, config, train_writer=None, val_writer=None):
 
             points = train_transforms(points)
 
-            log_softmax_out, _ = base_model(points) # return_features 인자 제거
+            forward_out = base_model(points, return_features=True)
+            if isinstance(forward_out, tuple) and len(forward_out) == 2:
+                log_softmax_out, features = forward_out
+            else:
+                raise ValueError('Model forward must return (logits, features) when return_features=True')
+
             ret = log_softmax_out # 첫 번째 값 사용
-            loss, acc = base_model.module.get_loss_acc(ret, label)
+            loss, acc = base_model.module.get_loss_acc(ret, label, features=features)
             # --- [REID] 수정 끝 ---
 
             _loss = loss
@@ -292,6 +339,14 @@ def run_net(args, config, train_writer=None, val_writer=None):
         if epoch % args.val_freq == 0 and epoch != 0:
             # --- [REID] validate 함수는 이제 ReID 메트릭을 반환 (Acc_Metric) ---
             metrics = validate(base_model, test_dataloader, epoch, val_writer, args, config, logger=logger)
+            _update_reid_metrics_file(
+                args.experiment_path,
+                epoch,
+                metrics.rank1,
+                metrics.rank5,
+                metrics.mAP,
+                is_best=False,
+            )
             # --- [REID] 수정 끝 ---
 
             # --- [REID] Encoder 동결 해제 로직 수정 (acc -> rank1) ---
@@ -312,6 +367,14 @@ def run_net(args, config, train_writer=None, val_writer=None):
                 best_metrics = metrics
                 builder.save_checkpoint(base_model, optimizer, epoch, metrics, best_metrics, 'ckpt-best', args, logger = logger)
                 print_log("--------------------------------------------------------------------------------------------", logger=logger)
+                _update_reid_metrics_file(
+                    args.experiment_path,
+                    epoch,
+                    metrics.rank1,
+                    metrics.rank5,
+                    metrics.mAP,
+                    is_best=True,
+                )
             
             # --- [REID] VOTE 기능 비활성화 (ReID와 호환되지 않음) ---
             # if args.vote:
@@ -348,7 +411,11 @@ def validate(base_model, test_dataloader, epoch, val_writer, args, config, logge
 
             points = misc.fps(points, npoints)
 
-            log_softmax_out, features = base_model(points) # return_features 인자 제거
+            forward_out = base_model(points, return_features=True)
+            if isinstance(forward_out, tuple) and len(forward_out) == 2:
+                log_softmax_out, features = forward_out
+            else:
+                raise ValueError('Model forward must return (logits, features) when return_features=True')
             target = label.view(-1)
 
             all_features.append(features.detach()) # GPU에 유지
@@ -376,8 +443,8 @@ def validate(base_model, test_dataloader, epoch, val_writer, args, config, logge
         val_writer.add_scalar('Metric/Rank-1', rank1, epoch)
         val_writer.add_scalar('Metric/Rank-5', rank5, epoch)
 
-    # ReID 메트릭이 담긴 Acc_Metric 객체 반환
-    return Acc_Metric(mAP=mAP, rank1=rank1)
+    metrics = Acc_Metric(mAP=mAP, rank1=rank1, rank5=rank5)
+    return metrics
 # --- [REID] validate 함수 교체 완료 ---
 
 
@@ -436,7 +503,11 @@ def test_net_reid(args, config, logger = None):
             points = misc.fps(points, npoints)
 
             # 피처 추출
-            log_softmax_out, features = base_model(points)
+            forward_out = base_model(points, return_features=True)
+            if isinstance(forward_out, tuple) and len(forward_out) == 2:
+                log_softmax_out, features = forward_out
+            else:
+                raise ValueError('Model forward must return (logits, features) when return_features=True')
             target = label.view(-1)
             all_features.append(features.detach())
             all_labels.append(target.detach())

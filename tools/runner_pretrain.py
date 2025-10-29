@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import os
+import itertools
 import json
 from tools import builder
 from utils import misc, dist_utils
@@ -25,6 +26,14 @@ train_transforms = transforms.Compose(
         data_transforms.PointcloudViewpointMasking(),
     ]
 )
+
+
+def _cfg_get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
 
 class Acc_Metric:
     def __init__(self, acc = 0.):
@@ -93,10 +102,26 @@ def run_net(args, config, train_writer=None, val_writer=None):
     if args.resume:
         builder.resume_optimizer(optimizer, args, logger = logger)
 
-    is_cross_view = config.dataset.train.others.get('cross_view_pretrain', False)
-    if is_cross_view:
-        print_log('CrossView pre-training mode enabled in runner.', logger=logger)
-    # ★★★ 수정 끝 ★★★
+    # optional cross-view generation utilities
+    use_dual_view_pairs = getattr(config.model, 'use_dual_view_pairs', False)
+    pair_masker = None
+    num_view_masks = 0
+    include_reverse_pairs = False
+    if use_dual_view_pairs:
+        pair_mask_cfg = getattr(config.model, 'pairwise_masking', None)
+        num_view_masks = max(int(getattr(config.model, 'num_view_masks', 10)), 2)
+        include_reverse_pairs = bool(getattr(config.model, 'include_reverse_pairs', False))
+        viewpoint_ratio = float(_cfg_get(pair_mask_cfg, 'viewpoint_mask_ratio', 0.5))
+        random_ratio = float(_cfg_get(pair_mask_cfg, 'random_mask_ratio', 0.0))
+        pair_masker = data_transforms.PointcloudViewpointMasking(
+            viewpoint_mask_ratio=viewpoint_ratio,
+            random_mask_ratio=random_ratio,
+        )
+        print_log(
+            f'[Cross-View Pretrain] Using {num_view_masks} masked views per sample ' \
+            f'(reverse_pairs={include_reverse_pairs}).',
+            logger=args.log_name,
+        )
 
     # trainval
     # training
@@ -123,38 +148,34 @@ def run_net(args, config, train_writer=None, val_writer=None):
             data_time.update(time.time() - batch_start_time)
             npoints = config.dataset.train.others.npoints
             dataset_name = config.dataset.train._base_.NAME
-            if is_cross_view:
-                # CrossView: Unpack (points, mask1, mask2, label)
-                points = data_tuple[0].cuda()
-                mask_view1 = data_tuple[1].cuda()
-                mask_view2 = data_tuple[2].cuda()
-                # label = data_tuple[3].cuda() # Label not typically needed for MAE pre-train
+            points = data_tuple[0].cuda()
+
+            # --- Handle different dataset structures if necessary ---
+            npoints = config.dataset.train.others.npoints
+            if dataset_name == 'ModelNet':  # Example for ModelNet
+                points = misc.fps(points, npoints)
+
+            if use_dual_view_pairs:
+                masked_views = []
+                for _ in range(num_view_masks):
+                    masked_views.append(pair_masker(points.clone()))
+
+                combo_indices = list(itertools.combinations(range(num_view_masks), 2))
+                if include_reverse_pairs:
+                    combo_indices += [(j, i) for (i, j) in combo_indices]
+
+                pair_batches = [
+                    torch.stack([masked_views[i], masked_views[j]], dim=1)
+                    for i, j in combo_indices
+                ]
+
+                pair_tensor = torch.stack(pair_batches, dim=1).reshape(
+                    -1, 2, points.shape[1], points.shape[2]
+                )
+                loss_tuple = base_model(pair_tensor)
             else:
-                # Original Point-MAE: Unpack (points, label)
-                points = data_tuple[0].cuda()
-                # label = data_tuple[1].cuda()
-
-                # --- Handle different dataset structures if necessary ---
-                # This part might need adjustment based on how non-SimulationShip datasets return data
-                npoints = config.dataset.train.others.npoints
-                dataset_name = config.dataset.train._base_.NAME
-                if dataset_name == 'ModelNet': # Example for ModelNet
-                     points = misc.fps(points, npoints)
-                # Note: The original code had specific handling for ShapeNet/ModelNet.
-                # Ensure 'points' is correctly assigned for non-CrossView case.
-                # The code here assumes data_tuple[0] is always the points tensor
-                # for the non-cross-view case, which seems consistent with original logic.
-
-            # Apply augmentations AFTER potentially generating masks in dataset
-            # (Check if this is the desired order)
-            points = train_transforms(points)
-
-            # ★★★ [수정 3/3] Call model forward pass accordingly ★★★
-            if is_cross_view:
-                # Use POSITIONAL arguments for DataParallel compatibility
-                loss_tuple = base_model(points, mask_view1, mask_view2) # <-- Fixed line
-            else:
-                # Original Point-MAE call
+                # Apply augmentations AFTER potentially generating masks in dataset
+                points = train_transforms(points)
                 loss_tuple = base_model(points)
             
             # Check if model output is a tuple/list (multi-GPU) or a single tensor

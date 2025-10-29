@@ -6,6 +6,7 @@ from timm.models.layers import DropPath, trunc_normal_
 import numpy as np
 from .build import MODELS
 from utils import misc
+from utils.loss_utils import classification_triplet_loss
 from utils.checkpoint import get_missing_parameters_message, get_unexpected_parameters_message
 from utils.logger import *
 import random
@@ -475,6 +476,147 @@ class Point_MAE(nn.Module):
         else:
             return loss1
 
+
+@MODELS.register_module()
+class Point_MAE_CrossView(nn.Module):
+    """Cross-view Masked Autoencoder that reconstructs a second view from an encoded first view."""
+
+    def __init__(self, config):
+        super().__init__()
+        print_log('[Point_MAE_CrossView] Initializing cross-view reconstruction head.', logger='Point_MAE_CrossView')
+        self.config = config
+
+        self.trans_dim = config.transformer_config.trans_dim
+        self.encoder_dims = config.transformer_config.encoder_dims
+        self.depth = config.transformer_config.depth
+        self.drop_path_rate = config.transformer_config.drop_path_rate
+        self.num_heads = config.transformer_config.num_heads
+
+        self.group_size = config.group_size
+        self.num_group = config.num_group
+
+        # Shared building blocks
+        self.group_divider = Group(num_group=self.num_group, group_size=self.group_size)
+        self.encoder = Encoder(encoder_channel=self.encoder_dims)
+
+        self.pos_embed = nn.Sequential(
+            nn.Linear(3, 128),
+            nn.GELU(),
+            nn.Linear(128, self.trans_dim),
+        )
+
+        dpr = [x.item() for x in torch.linspace(0, self.drop_path_rate, self.depth)]
+        self.blocks = TransformerEncoder(
+            embed_dim=self.trans_dim,
+            depth=self.depth,
+            drop_path_rate=dpr,
+            num_heads=self.num_heads,
+        )
+        self.norm = nn.LayerNorm(self.trans_dim)
+
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, self.trans_dim))
+        self.decoder_pos_embed = nn.Sequential(
+            nn.Linear(3, 128),
+            nn.GELU(),
+            nn.Linear(128, self.trans_dim),
+        )
+
+        self.decoder_depth = config.transformer_config.decoder_depth
+        self.decoder_num_heads = config.transformer_config.decoder_num_heads
+        decoder_dpr = [x.item() for x in torch.linspace(0, self.drop_path_rate, self.decoder_depth)]
+        self.MAE_decoder = TransformerDecoder(
+            embed_dim=self.trans_dim,
+            depth=self.decoder_depth,
+            drop_path_rate=decoder_dpr,
+            num_heads=self.decoder_num_heads,
+        )
+
+        self.increase_dim = nn.Sequential(
+            nn.Conv1d(self.trans_dim, 3 * self.group_size, 1)
+        )
+
+        trunc_normal_(self.mask_token, std=.02)
+        self.loss = config.loss
+        self.build_loss_func(self.loss)
+        self.apply(self._init_weights)
+
+    def build_loss_func(self, loss_type):
+        if loss_type == "cdl1":
+            self.loss_func = ChamferDistanceL1().cuda()
+        elif loss_type == 'cdl2':
+            self.loss_func = ChamferDistanceL2().cuda()
+        else:
+            raise NotImplementedError
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+        elif isinstance(m, nn.Conv1d):
+            trunc_normal_(m.weight, std=.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def _unpack_pair(self, pts):
+        if isinstance(pts, (list, tuple)):
+            if len(pts) != 2:
+                raise ValueError(
+                    f'Point_MAE_CrossView expects exactly two tensors, but received {len(pts)} inputs.'
+                )
+            src, tgt = pts
+        elif torch.is_tensor(pts):
+            if pts.dim() != 4 or pts.size(1) != 2:
+                raise ValueError(
+                    'Point_MAE_CrossView expects a tensor shaped (B, 2, N, C); '
+                    f'got shape {tuple(pts.shape)}.'
+                )
+            src, tgt = pts[:, 0], pts[:, 1]
+        else:
+            raise TypeError('Point_MAE_CrossView requires a tensor or a tuple/list of tensors as input.')
+
+        if src.dim() != 3 or tgt.dim() != 3:
+            raise ValueError(
+                'Point_MAE_CrossView expects each input view to be shaped (B, N, C); '
+                f'got {tuple(src.shape)} and {tuple(tgt.shape)}.'
+            )
+
+        return src.contiguous(), tgt.contiguous()
+
+    def forward(self, pts, vis=False, **kwargs):
+        src_pts, tgt_pts = self._unpack_pair(pts)
+
+        src_neighborhood, src_center = self.group_divider(src_pts)
+        tgt_neighborhood, tgt_center = self.group_divider(tgt_pts)
+
+        src_tokens = self.encoder(src_neighborhood)
+        src_pos = self.pos_embed(src_center)
+        src_tokens = self.blocks(src_tokens, src_pos)
+        src_tokens = self.norm(src_tokens)
+
+        mask_token = self.mask_token.expand(src_tokens.size(0), self.num_group, -1)
+        tgt_pos = self.decoder_pos_embed(tgt_center)
+        x_full = torch.cat([src_tokens, mask_token], dim=1)
+        pos_full = torch.cat([src_pos, tgt_pos], dim=1)
+
+        x_rec = self.MAE_decoder(x_full, pos_full, self.num_group)
+
+        rebuild_points = self.increase_dim(x_rec.transpose(1, 2)).transpose(1, 2)
+        rebuild_points = rebuild_points.reshape(src_tokens.size(0) * self.num_group, -1, 3)
+        gt_points = tgt_neighborhood.reshape(src_tokens.size(0) * self.num_group, -1, 3)
+
+        loss = self.loss_func(rebuild_points, gt_points)
+
+        if vis:
+            src_vis = src_neighborhood.reshape(src_tokens.size(0) * self.num_group, -1, 3)
+            tgt_vis = tgt_neighborhood.reshape(src_tokens.size(0) * self.num_group, -1, 3)
+            return loss, src_vis, tgt_vis
+
+        return loss
+
 # finetune model
 @MODELS.register_module()
 class PointTransformer(nn.Module):
@@ -534,12 +676,25 @@ class PointTransformer(nn.Module):
 
     def build_loss_func(self):
         self.loss_ce = nn.NLLLoss()
+        self.triplet_margin = self.config.get('triplet_margin', 0.3)
+        self.triplet_weight = self.config.get('triplet_weight', 1.0)
+        self.ce_weight = self.config.get('ce_weight', 1.0)
+        self.normalize_triplet = self.config.get('normalize_triplet_feature', True)
 
-    def get_loss_acc(self, ret, gt):
-        loss = self.loss_ce(ret, gt.long())
+    def get_loss_acc(self, ret, gt, features=None):
+        total_loss, _, _ = classification_triplet_loss(
+            ret,
+            gt,
+            self.loss_ce,
+            features=features,
+            margin=self.triplet_margin,
+            ce_weight=self.ce_weight,
+            triplet_weight=self.triplet_weight,
+            normalize_triplet=self.normalize_triplet,
+        )
         pred = ret.argmax(-1)
         acc = (pred == gt).sum() / float(gt.size(0))
-        return loss, acc * 100
+        return total_loss, acc * 100
 
     def load_model_from_ckpt(self, bert_ckpt_path):
         if bert_ckpt_path is not None:
@@ -621,14 +776,9 @@ class PointTransformer(nn.Module):
 
         log_softmax_out = F.log_softmax(logits, dim=-1)
 
-        # if return_features:
-        #     # ReID 평가 시 (Step 4에서 사용): (소프트맥스, 피처) 튜플 반환
-        #     return log_softmax_out, features
-        # else:
-        #     # 기본(기존 Classification) 동작: 소프트맥스 결과만 반환
-        #     return log_softmax_out
-        
-        return log_softmax_out, features
+        if return_features:
+            return log_softmax_out, features
+        return log_softmax_out
 
 
 @MODELS.register_module()
@@ -682,6 +832,10 @@ class DGCNN_ReID(nn.Module):
 
     def build_loss_func(self):
         self.loss_ce = nn.NLLLoss()
+        self.triplet_margin = self.config.get('triplet_margin', 0.3)
+        self.triplet_weight = self.config.get('triplet_weight', 1.0)
+        self.ce_weight = self.config.get('ce_weight', 1.0)
+        self.normalize_triplet = self.config.get('normalize_triplet_feature', True)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -704,12 +858,20 @@ class DGCNN_ReID(nn.Module):
              print_log('DGCNN_ReID: Training from scratch!!!', logger='DGCNN_ReID')
         self.apply(self._init_weights)
 
-    def get_loss_acc(self, ret, gt):
-        # PointTransformer와 동일
-        loss = self.loss_ce(ret, gt.long())
+    def get_loss_acc(self, ret, gt, features=None):
+        total_loss, _, _ = classification_triplet_loss(
+            ret,
+            gt,
+            self.loss_ce,
+            features=features,
+            margin=self.triplet_margin,
+            ce_weight=self.ce_weight,
+            triplet_weight=self.triplet_weight,
+            normalize_triplet=self.normalize_triplet,
+        )
         pred = ret.argmax(-1)
         acc = (pred == gt).sum() / float(gt.size(0))
-        return loss, acc * 100
+        return total_loss, acc * 100
 
     def forward(self, pts, return_features=False):
         # --- DGCNN 백본 ---
@@ -752,7 +914,9 @@ class DGCNN_ReID(nn.Module):
 
         log_softmax_out = F.log_softmax(logits, dim=-1)
 
-        return log_softmax_out, features
+        if return_features:
+            return log_softmax_out, features
+        return log_softmax_out
     
 class PointNetSetAbstraction(nn.Module):
     def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all):
@@ -879,6 +1043,10 @@ class PointNet2_ReID(nn.Module):
 
     def build_loss_func(self):
         self.loss_ce = nn.NLLLoss()
+        self.triplet_margin = self.config.get('triplet_margin', 0.3)
+        self.triplet_weight = self.config.get('triplet_weight', 1.0)
+        self.ce_weight = self.config.get('ce_weight', 1.0)
+        self.normalize_triplet = self.config.get('normalize_triplet_feature', True)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -901,12 +1069,20 @@ class PointNet2_ReID(nn.Module):
              print_log('PointNet2_ReID: Training from scratch!!!', logger='PointNet2_ReID')
         self.apply(self._init_weights)
 
-    def get_loss_acc(self, ret, gt):
-        # PointTransformer와 동일
-        loss = self.loss_ce(ret, gt.long())
+    def get_loss_acc(self, ret, gt, features=None):
+        total_loss, _, _ = classification_triplet_loss(
+            ret,
+            gt,
+            self.loss_ce,
+            features=features,
+            margin=self.triplet_margin,
+            ce_weight=self.ce_weight,
+            triplet_weight=self.triplet_weight,
+            normalize_triplet=self.normalize_triplet,
+        )
         pred = ret.argmax(-1)
         acc = (pred == gt).sum() / float(gt.size(0))
-        return loss, acc * 100
+        return total_loss, acc * 100
 
     def forward(self, pts, return_features=False):
         # --- PointNet++ 백본 ---
@@ -941,4 +1117,6 @@ class PointNet2_ReID(nn.Module):
 
         log_softmax_out = F.log_softmax(logits, dim=-1)
 
-        return log_softmax_out, features
+        if return_features:
+            return log_softmax_out, features
+        return log_softmax_out

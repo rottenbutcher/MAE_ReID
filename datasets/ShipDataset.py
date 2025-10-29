@@ -5,8 +5,6 @@ import torch
 import numpy as np
 import torch.utils.data as data
 from .build import DATASETS
-from .io import IO
-from .data_transforms import generate_two_viewpoint_masks, PointcloudViewpointMasking
 def pc_normalize(pc):
     """ pc: NxC, return NxC """
     centroid = np.mean(pc, axis=0)
@@ -28,12 +26,6 @@ class SimulationShip(data.Dataset):
         self.labels = {file_name: i for i, file_name in enumerate(self.file_list)}
         
         print(f'[DATASET] SimulationShip: {len(self.file_list)} files loaded.')
-        self.cross_view_pretrain = config.get('cross_view_pretrain', False) # Correct access
-        if self.cross_view_pretrain:
-             print('[DATASET] SimulationShip configured for CrossView pre-training (returning two masks).')
-        self.viewpoint_mask_ratio = config.get('viewpoint_mask_ratio', 0.5) # Example: Get from config or default
-        self.random_mask_ratio = config.get('random_mask_ratio', 0.4) # Example: Get from config or default
-        # 점 개수가 npoints보다 많을 경우, 랜덤 샘플링을 위한 인덱스
         self.permutation = np.arange(self.npoints)
 
     def __getitem__(self, idx):
@@ -55,22 +47,9 @@ class SimulationShip(data.Dataset):
         points = torch.from_numpy(points).float()
         
         label = self.labels[file_name]
-        if self.cross_view_pretrain:
-            # --- CrossView 학습 시: 두 개의 마스크 생성 ---
-            mask_view1, mask_view2 = generate_two_viewpoint_masks(
-                points,
-                # viewpoint_mask_ratio=self.viewpoint_mask_ratio, # 필요시 전달
-                # random_mask_ratio=self.random_mask_ratio    # 필요시 전달
-            ) # mask_view1, mask_view2 shape: (N,)
-
-            # (원본 포인트, 마스크1, 마스크2, 레이블) 반환
-            return 'simulation_ship', os.path.splitext(file_name)[0], (points, mask_view1, mask_view2, label)
-        else:
-            # --- 기존 Point-MAE 학습 시: (포인트, 레이블)만 반환 ---
-            # 기존 학습 파이프라인에서는 이후 단계에서 PointcloudViewpointMasking 같은
-            # 변환(transform)이 적용되거나 모델 내부에서 마스킹 처리합니다.
-            return 'simulation_ship', os.path.splitext(file_name)[0], (points, label)
-        # ★★★ 수정 끝 ★★★
+        # Cross-view 학습을 지원하기 위해 데이터셋 내부에서 마스크를 생성하지 않습니다.
+        # 모든 인코더는 단일 포인트 클라우드만 입력으로 사용하며, 마스킹은 transform 또는 모델에서 처리됩니다.
+        return 'simulation_ship', os.path.splitext(file_name)[0], (points, label)
 
     def __len__(self):
         return len(self.file_list)
