@@ -98,10 +98,10 @@ def main():
         print_log(f'Task: ReID/Finetune (using tools/runner.py)', logger=logger)
         if args.test:
             # ReID 테스트 실행
-            test_net(args, config)
+            test_net_reid(args, config)
         else:
             # ReID 학습(finetune) 실행
-            finetune_net(args, config, train_writer, val_writer)
+            reid_run_net(args, config, train_writer, val_writer)
             
     elif task_type == 'pretrain':
         # --- 사전학습 작업 ---
