@@ -2,7 +2,7 @@ import inspect
 import warnings
 from functools import partial
 from utils import config
-
+from utils import misc
 class Registry:
     """A registry to map strings to classes.
     Registered object could be built from registry.
