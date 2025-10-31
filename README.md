@@ -67,8 +67,9 @@ Make sure each subset contains point clouds stored in the formats expected by
 
 `RealShip` reads text files that list the relative path to every `.npy` file
 belonging to a split. Entries should look like
-`reid_val/FP_target4/scan.npy`, i.e. a path relative to `data/Ship_Real_ext`
-that includes the subset directory and the class folder.
+`FP_target4/scan.npy`, i.e. a path relative to `data/Ship_Real_ext`
+that *excludes* the subset directory (e.g., reid_val) and starts with the class
+folder.
 
 Use `tools/create_split_txt.py` to generate these lists automatically:
 
