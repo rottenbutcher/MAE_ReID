@@ -21,7 +21,7 @@ dataset : {
             others: {subset: 'reid_test', npoints: 1024}}}
 
 model : {
-  NAME: Point_MAE,
+  NAME: PointTransformer,
   group_size: 32,
   num_group: 256,
   cls_dim: 19,
@@ -29,18 +29,16 @@ model : {
   triplet_weight: 1.0,
   ce_weight: 1.0,
   normalize_triplet_feature: True,
-  transformer_config: {
-    mask_type: 'rand',
-    mask_ratio: 0.7,
-    viewpoint_mask_ratio: 0.5,
-    trans_dim: 384,
-    encoder_dims: 384,
-    depth: 12,
-    drop_path_rate: 0.1,
-    num_heads: 6,
-    decoder_depth: 4,
-    decoder_num_heads: 6,
-  }
+  mask_type: 'rand',
+  mask_ratio: 0.7,
+  viewpoint_mask_ratio: 0.5,
+  trans_dim: 384,
+  encoder_dims: 384,
+  depth: 12,
+  drop_path_rate: 0.1,
+  num_heads: 6,
+  decoder_depth: 4,
+  decoder_num_heads: 6,
 }
 
 npoints: 1024

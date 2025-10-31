@@ -1,7 +1,5 @@
 from tools import pretrain_run_net as pretrain
 from tools.runner_pretrain import run_net as pretrain_net  # 사전학습용
-from tools.runner import run_net as finetune_net  # ReID/파인튜닝용
-from tools.runner import test_net         # ReID/파인튜닝 테스트용
 
 # --- [수정] Classification과 ReID의 함수를 명확히 분리하여 임포트 ---
 
