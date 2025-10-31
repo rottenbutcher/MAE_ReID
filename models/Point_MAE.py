@@ -441,41 +441,116 @@ class Point_MAE(nn.Module):
     def forward(self, pts, vis = False, **kwargs):
         neighborhood, center = self.group_divider(pts)
 
-        x_vis, mask = self.MAE_encoder(neighborhood, center)
-        B,_,C = x_vis.shape # B VIS C
+        # 1. 인코더 실행 (패딩된 x_vis와 pos_emd_vis 반환)
+        x_vis, mask, pos_emd_vis= self.MAE_encoder(neighborhood, center)
+        B, V_padded, C = x_vis.shape # B, max_visible_len, C
 
-        pos_emd_vis = self.decoder_pos_embed(center[~mask]).reshape(B, -1, C)
+        # 2. 마스킹된 토큰 정보 계산 (패딩 처리)
+        bool_mask_pos = mask
+        mask_tokens_len = bool_mask_pos.long().sum(dim=1)
+        max_mask_tokens_len = torch.max(mask_tokens_len)
+        
+        # 3. 마스킹된 토큰의 위치 임베딩 및 정답(GT) 패딩 텐서 생성
+        # (B, max_mask_len, 3)
+        masked_center_for_pos = torch.zeros(B, max_mask_tokens_len, 3).to(center.device)
+        
+        S = neighborhood.shape[2] # Group size (e.g., 32)
+        # (B, max_mask_len, S, 3)
+        gt_points_padded = torch.zeros(B, max_mask_tokens_len, S, 3).to(neighborhood.device)
 
-        pos_emd_mask = self.decoder_pos_embed(center[mask]).reshape(B, -1, C)
+        for bz in range(B):
+            current_mask_len = mask_tokens_len[bz]
+            if current_mask_len == 0:
+                continue
+            
+            # 3-1. 마스킹된 센터 좌표 수집 (위치 임베딩용)
+            mask_centers = center[bz][bool_mask_pos[bz]]
+            masked_center_for_pos[bz][0:current_mask_len] = mask_centers
+            
+            # 3-2. 마스킹된 Neighborhood (정답) 수집 (손실 계산용)
+            mask_neighborhoods = neighborhood[bz][bool_mask_pos[bz]]
+            gt_points_padded[bz][0:current_mask_len] = mask_neighborhoods
+            
+        # 4. 디코더 입력 준비
+        pos_emd_mask = self.decoder_pos_embed(masked_center_for_pos)
+        
+        M_padded = max_mask_tokens_len # M_padded = 최대 마스크 토큰 수
+        mask_token = self.mask_token.expand(B, M_padded, -1)
+        
+        x_full = torch.cat([x_vis, mask_token], dim=1)       # (B, V_padded + M_padded, C)
+        pos_full = torch.cat([pos_emd_vis, pos_emd_mask], dim=1) # (B, V_padded + M_padded, C)
 
-        _,N,_ = pos_emd_mask.shape
-        mask_token = self.mask_token.expand(B, N, -1)
-        x_full = torch.cat([x_vis, mask_token], dim=1)
-        pos_full = torch.cat([pos_emd_vis, pos_emd_mask], dim=1)
+        # 5. 디코더 실행 (마스킹된 토큰에 대해서만 예측)
+        x_rec = self.MAE_decoder(x_full, pos_full, M_padded) # (B, M_padded, C)
 
-        x_rec = self.MAE_decoder(x_full, pos_full, N)
+        # 6. 재구성 헤드 (패딩된 상태로 재구성)
+        # (B, M_padded, S*3)
+        rebuild_points_padded_flat = self.increase_dim(x_rec.transpose(1, 2)).transpose(1, 2)
+        # (B, M_padded, S, 3) - 로컬 좌표
+        rebuild_points_padded = rebuild_points_padded_flat.reshape(B, M_padded, S, 3)
 
-        B, M, C = x_rec.shape
-        rebuild_points = self.increase_dim(x_rec.transpose(1, 2)).transpose(1, 2).reshape(B * M, -1, 3)  # B M 1024
-
-        gt_points = neighborhood[mask].reshape(B*M,-1,3)
-        loss1 = self.loss_func(rebuild_points, gt_points)
+        # 7. 손실 계산 (패딩 제외)
+        # 실제 토큰만 다시 추출
+        rebuild_points_flat_list = []
+        gt_points_flat_list = []
+        
+        for bz in range(B):
+            current_mask_len = mask_tokens_len[bz]
+            if current_mask_len > 0:
+                rebuild_points_flat_list.append(rebuild_points_padded[bz][:current_mask_len])
+                gt_points_flat_list.append(gt_points_padded[bz][:current_mask_len])
+        
+        if not rebuild_points_flat_list:
+            # 이 배치에 마스킹된 토큰이 하나도 없는 경우 (매우 드묾)
+            loss1 = torch.tensor(0.0, device=pts.device, requires_grad=True)
+        else:
+            # (Total_Actual_Masked, S, 3)
+            rebuild_points_final = torch.cat(rebuild_points_flat_list, dim=0) 
+            # (Total_Actual_Masked, S, 3)
+            gt_points_final = torch.cat(gt_points_flat_list, dim=0)       
+            
+            loss1 = self.loss_func(rebuild_points_final, gt_points_final)
 
         if vis: #visualization
-            vis_points = neighborhood[~mask].reshape(B * (self.num_group - M), -1, 3)
-            full_vis = vis_points + center[~mask].unsqueeze(1)
-            full_rebuild = rebuild_points + center[mask].unsqueeze(1)
-            full = torch.cat([full_vis, full_rebuild], dim=0)
-            # full_points = torch.cat([rebuild_points,vis_points], dim=0)
-            full_center = torch.cat([center[mask], center[~mask]], dim=0)
-            # full = full_points + full_center.unsqueeze(1)
-            ret2 = full_vis.reshape(-1, 3).unsqueeze(0)
-            ret1 = full.reshape(-1, 3).unsqueeze(0)
-            # return ret1, ret2
-            return ret1, ret2, full_center
+            # 시각화 로직도 패딩 기반으로 수정
+            bool_vis_pos = ~mask
+            vis_tokens_len = bool_vis_pos.long().sum(dim=1)
+            
+            vis_points_flat_list = []
+            rebuild_points_flat_list_vis = [] # loss 계산용과는 별개 (글로벌 좌표)
+            full_center_list = []
+
+            for bz in range(B):
+                # 1. 보이는 포인트 (vis_points)
+                current_vis_len = vis_tokens_len[bz]
+                if current_vis_len > 0:
+                    vis_neighborhoods = neighborhood[bz][bool_vis_pos[bz]] # (V, S, 3)
+                    vis_centers = center[bz][bool_vis_pos[bz]].unsqueeze(1) # (V, 1, 3)
+                    vis_points_global = vis_neighborhoods + vis_centers      # (V, S, 3)
+                    vis_points_flat_list.append(vis_points_global.reshape(-1, 3)) # (V*S, 3)
+
+                # 2. 재구성된 포인트 (rebuild_points)
+                current_mask_len = mask_tokens_len[bz]
+                if current_mask_len > 0:
+                    rebuild_points_local = rebuild_points_padded[bz][:current_mask_len] # (M, S, 3)
+                    mask_centers = center[bz][bool_mask_pos[bz]].unsqueeze(1)    # (M, 1, 3)
+                    rebuild_points_global = rebuild_points_local + mask_centers        # (M, S, 3)
+                    rebuild_points_flat_list_vis.append(rebuild_points_global.reshape(-1, 3)) # (M*S, 3)
+
+                # 3. 센터 (디버깅용)
+                full_center_list.append(center[bz]) # (G, 3)
+
+            # (B, N, 3) 형태처럼 다시 합침
+            vis_points_batch = torch.cat(vis_points_flat_list, dim=0).unsqueeze(0) # (1, Total_Vis, 3)
+            rebuild_points_batch = torch.cat(rebuild_points_flat_list_vis, dim=0).unsqueeze(0) # (1, Total_Mask, 3)
+            full_points_batch = torch.cat([vis_points_batch, rebuild_points_batch], dim=1) # (1, Total_Vis+Total_Mask, 3)
+            
+            full_center_batch = torch.cat(full_center_list, dim=0).unsqueeze(0) # (1, B*G, 3)
+            
+            # (ret1: 전체, ret2: 보이는 부분, full_center: 센터)
+            return full_points_batch, vis_points_batch, full_center_batch
         else:
             return loss1
-
 
 @MODELS.register_module()
 class Point_MAE_CrossView(nn.Module):
