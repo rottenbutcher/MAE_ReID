@@ -142,7 +142,7 @@ class PointcloudViewpointMasking(object):
             azimuth_angle_deg = torch.FloatTensor(1).uniform_(0, 360)
             if not ((70 <= azimuth_angle_deg <= 110) or (250 <= azimuth_angle_deg <= 290)):
                 break
-        azimuth_angle = torch.deg2rad(azimuth_angle_deg).to(points.device)
+        azimuth_angle = torch.deg2rad(azimuth_angle_deg[0]).to(points.device)
         xz_proj = torch.cos(elevation_angle)
         viewpoint = torch.stack(
             [xz_proj * torch.cos(azimuth_angle), torch.sin(elevation_angle), xz_proj * torch.sin(azimuth_angle)],
