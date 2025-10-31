@@ -1,8 +1,7 @@
-# cfgs/finetune_marine.yaml
 optimizer : {
   type: AdamW,
   kwargs: {
-  lr : 0.0005,
+  lr : 0.00005,
   weight_decay : 0.05
 }}
 
@@ -15,26 +14,29 @@ scheduler: {
 
 dataset : {
   train : { _base_: cfgs/dataset_configs/Real_Ship.yaml,
-            others: {subset: 'train', npoints: 1024}}, # <-- 여기에 npoints 추가
+            others: {subset: 'real_ship_cls_train', npoints: 1024}},
   val : { _base_: cfgs/dataset_configs/Real_Ship.yaml,
-            others: {subset: 'test', npoints: 1024}},  # <-- 여기에 npoints 추가
+            others: {subset: 'real_ship_cls_val', npoints: 1024}},
   test : { _base_: cfgs/dataset_configs/Real_Ship.yaml,
-            others: {subset: 'test', npoints: 1024}}} # <-- 여기에 npoints 추가
+            others: {subset: 'real_ship_cls_test', npoints: 1024}}}
+
 model : {
   NAME: PointTransformer,
   trans_dim: 384,
   depth: 12,
   drop_path_rate: 0.1,
-  cls_dim: 20,
+  cls_dim: 19,
+  # cls_dim: 22 # TODO: Update this to match your total number of classes in Real_Ship
   num_heads: 6,
   group_size: 32,
-  num_group: 64,
+  num_group: 256,
   encoder_dims: 384,
 }
 
 npoints: 1024
-total_bs : 32
+total_bs : 18
 step_per_update : 1
 max_epoch : 200
 grad_norm_clip : 10
+
 task: 'classification'

@@ -37,3 +37,4 @@ total_bs : 32
 step_per_update : 1
 max_epoch : 150
 grad_norm_clip : 10
+task: 'classification'

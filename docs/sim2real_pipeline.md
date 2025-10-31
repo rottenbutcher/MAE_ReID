@@ -107,3 +107,14 @@ The `expected_rank` column encodes the target ordering required by the project
 If an entry shows `metrics: null`, the corresponding fine-tuning run has not yet
 produced `reid_metrics.json`. Make sure the training loop completed and saved a
 `ckpt-best.pth` checkpoint.
+
+## Note on Classification vs. Re-Identification Pipelines
+
+This document focuses on the Sim-to-Real **Re-Identification** pipeline (using
+`task: 'reid'` and `runner_reid.py`), which validates viewpoint-dependent models
+(Tarr & Bülthoff).
+
+The repository also supports a separate **Classification** pipeline (using
+`task: 'classification'` and `runner_finetune.py`) for tasks like ModelNet40.
+This is used to validate viewpoint-invariant models (Biederman) and measures
+standard classification accuracy.

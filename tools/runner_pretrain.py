@@ -23,7 +23,7 @@ train_transforms = transforms.Compose(
         # data_transforms.PointcloudTranslate(),
         # data_transforms.PointcloudJitter(),
         # data_transforms.PointcloudRandomInputDropout(),
-        data_transforms.PointcloudViewpointMasking(),
+        # data_transforms.PointcloudViewpointMasking(),
     ]
 )
 
