@@ -1,0 +1,5 @@
+NAME: SimRealValidation
+SIM_DATA_PATH: data/Ship_Simulation
+REAL_DATA_PATH: data/Ship_Real_ext
+include_simulation: True
+include_real: True

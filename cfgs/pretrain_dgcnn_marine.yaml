@@ -19,8 +19,8 @@ dataset : {
   # [!!!] 데이터셋을 Simulation_Ship으로 설정
   train : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
             others: {subset: 'train', npoints: 8192}},
-  val : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
-            others: {subset: 'test', npoints: 8192}},
+  val : { _base_: cfgs/dataset_configs/SimReal_Validation.yaml,
+            others: {subset: 'val', npoints: 8192, real_subset: 'reid_val', real_max_classes: 5}},
 }
 
 model : {

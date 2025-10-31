@@ -16,8 +16,8 @@ scheduler: {
 dataset : {
   train : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
             others: {subset: 'train', npoints: 8192}},  # <-- 여기에 npoints 추가
-  val : { _base_: cfgs/dataset_configs/Simulation_Ship.yaml,
-            others: {subset: 'test', npoints: 8192}},   # <-- 여기에 npoints 추가
+  val : { _base_: cfgs/dataset_configs/SimReal_Validation.yaml,
+            others: {subset: 'val', npoints: 8192, real_subset: 'reid_val', real_max_classes: 5}},   # <-- 여기에 npoints 추가
 }
 model : {
   NAME: PointTransformer,

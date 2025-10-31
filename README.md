@@ -73,6 +73,40 @@ The table summarizes the available backbones:
 | Point-M2AE | Hierarchical masked auto-encoder. | `cfgs/pretrain_m2ae_marine.yaml` |
 | Point-MAE CrossView | Encodes one masked view and reconstructs a paired view. | `cfgs/pretrain_mae_marine_crossview.yaml` |
 
+### Training geometric baselines from scratch
+
+For direct sim-to-real studies you can train three geometric backbones entirely
+from the synthetic dataset while validating on a mixed set that includes a
+handful of real-world ship IDs:
+
+| Backbone | Config | Notes |
+| --- | --- | --- |
+| DGCNN ReID | `cfgs/pretrain_dgcnn_marine.yaml` | Uses `SimRealValidation` to mix simulation and real classes during validation. |
+| PointNeXt ReID | `cfgs/pretrain_pointnext_marine.yaml` | Same mixed-validation protocol with a PointNeXt encoder head. |
+| PointTransformer (supervised) | `cfgs/pretrain_supervised_marine.yaml` | Baseline PointTransformer trained from scratch. |
+
+All three configurations keep the training split purely synthetic but evaluate
+on the new `cfgs/dataset_configs/SimReal_Validation.yaml` recipe. By default the
+validation loader samples every synthetic test object plus the first five real
+classes (controlled via `real_max_classes`). You can explicitly list the desired
+real IDs with `real_class_whitelist` or increase the number of classes by
+editing the `others` section in each config. The helper dataset automatically
+offsets real-world class labels beyond the simulation label range so that
+validation metrics treat every synthetic and real identity as distinct.
+
+Example commands for the scratch baselines:
+
+```bash
+# DGCNN baseline
+python main.py --config cfgs/pretrain_dgcnn_marine.yaml --exp_name dgcnn_from_scratch
+
+# PointNeXt baseline
+python main.py --config cfgs/pretrain_pointnext_marine.yaml --exp_name pointnext_from_scratch
+
+# PointTransformer baseline
+python main.py --config cfgs/pretrain_supervised_marine.yaml --exp_name pointtransformer_from_scratch
+```
+
 Example commands:
 
 ```bash
