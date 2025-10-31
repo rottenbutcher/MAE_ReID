@@ -37,4 +37,4 @@ step_per_update : 1
 max_epoch : 200
 grad_norm_clip: 10
 
-task: 'pretrain'
+task: 'reid'

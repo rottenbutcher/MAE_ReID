@@ -67,8 +67,9 @@ Make sure each subset contains point clouds stored in the formats expected by
 
 `RealShip` reads text files that list the relative path to every `.npy` file
 belonging to a split. Entries should look like
-`reid_val/FP_target4/scan.npy`, i.e. a path relative to `data/Ship_Real_ext`
-that includes the subset directory and the class folder.
+`FP_target4/scan.npy`, i.e. a path relative to `data/Ship_Real_ext`
+that *excludes* the subset directory (e.g., reid_val) and starts with the class
+folder.
 
 Use `tools/create_split_txt.py` to generate these lists automatically:
 
@@ -213,9 +214,84 @@ During training the script logs Rank-1/Rank-5/mAP metrics to
 `experiments/<...>/reid_metrics.json` and saves `ckpt-best.pth` with the highest
 Rank-1 score.
 
+## 5. Fine-tuning for Standard Classification (on RealShip)
+
+This pipeline performs standard supervised classification on the `Real_Ship`
+dataset. It differs from the ReID workflow by splitting data by *sample* (not
+ID) and reporting *Accuracy* instead of mAP.
+
+### 1. Create Classification Splits
+
+**Run this script once before training.** It scans your RealShip directory and
+generates `real_ship_cls_train.txt`, `real_ship_cls_val.txt`, and
+`real_ship_cls_test.txt` based on the provided ratios (defaults to 80/10/10).
+
+```bash
+# Adjust --data_root to point at your Real_Ship dataset
+python tools/create_classification_splits.py --data_root ./data/Ship_Real_ext
+```
+
+### 2. Pre-training (Shared)
+
+Pre-train your desired backbone (e.g., Viewpoint-MAE) using the simulation
+datasets just as you would for ReID:
+
+```bash
+python main.py --config cfgs/pretrain_mae_marine.yaml --exp_name pretrain_viewmask_mae
+```
+
+### 3. Fine-tuning on RealShip (Classification)
+
+Use the new `cfgs/finetune_marine_classification.yaml` configuration. It sets
+`task: 'classification'` and consumes the sample-based split files to measure
+Accuracy.
+
+```bash
+# Measures ACCURACY on Real_Ship using sample-level splits
+python main.py --config cfgs/finetune_marine_classification.yaml --exp_name finetune_realship_classification \
+    --ckpts experiments/pretrain_mae_marine/cfgs/pretrain_viewmask_mae/ckpt-best.pth
+```
+
+This workflow is separate from the **Re-Identification** task (Section 4),
+which uses `task: 'reid'`, ID-based splits (e.g., `reid_train.txt`), and
+optimizes for Rank-1/Rank-5/mAP metrics.
+
+## 6. Fine-tuning for Classification (Viewpoint-Invariant Task)
+
+This pipeline is used to validate the (Biederman, 1987) hypothesis: models
+pre-trained on viewpoint-invariant properties (like `Point_MAE` with
+view-masking) should excel at viewpoint-invariant tasks like object
+classification.
+
+### 1. Pre-training (Shared)
+
+First, pre-train the desired backbone (e.g., Viewpoint-MAE):
+
+```bash
+python main.py --config cfgs/pretrain_mae_marine.yaml --exp_name pretrain_viewmask_mae
+```
+
+### 2. Fine-tuning on ModelNet40
+
+Run `main.py` using a classification config (e.g., `finetune_modelnet.yaml`). The
+`task: 'classification'` key routes the job to `runner_finetune.py`.
+
+```bash
+# This config uses the 'classification' runner to measure ACCURACY.
+python main.py --config cfgs/finetune_modelnet.yaml --exp_name finetune_viewmask_on_modelnet --ckpts experiments/pretrain_mae_marine/cfgs/pretrain_viewmask_mae/ckpt-best.pth
+```
+
+### 3. Test
+
+To test the final classification accuracy:
+
+```bash
+python main.py --test --config cfgs/finetune_modelnet.yaml --exp_name finetune_viewmask_on_modelnet --ckpts experiments/finetune_modelnet/cfgs/finetune_viewmask_on_modelnet/ckpt-best.pth
+```
+
 ---
 
-## 5. Evaluation / testing
+## 7. Evaluation / testing
 
 To evaluate a trained model without further updates, rerun `main.py` with
 `--test` and the checkpoint path:
@@ -258,7 +334,7 @@ default settings are too small for your hardware.
 
 ---
 
-## 6. Automated sim-to-real pipeline
+## 8. Automated sim-to-real pipeline
 
 `tools/sim2real_pipeline.py` automates the complete pre-train → fine-tune →
 evaluate cycle for the four main backbones (viewpoint Point-MAE, PCP-MAE,
@@ -282,7 +358,7 @@ After finishing, the script writes a consolidated summary to
 
 ---
 
-## 7. Tips and troubleshooting
+## 9. Tips and troubleshooting
 
 * All training scripts support distributed launchers via `--launcher pytorch`.
 * Use `--resume` to continue interrupted training from the last checkpoint.
