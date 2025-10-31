@@ -1,7 +1,4 @@
-from tools import pretrain_run_net as pretrain
 from tools.runner_pretrain import run_net as pretrain_net  # 사전학습용
-from tools.runner import run_net as finetune_net  # ReID/파인튜닝용
-from tools.runner import test_net         # ReID/파인튜닝 테스트용
 
 # --- [수정] Classification과 ReID의 함수를 명확히 분리하여 임포트 ---
 
@@ -103,6 +100,16 @@ def main():
             # ReID 학습(finetune) 실행
             reid_run_net(args, config, train_writer, val_writer)
             
+    elif task_type == 'classification':
+        # --- [수정] Classification 작업 추가 ---
+        print_log(f'Task: Classification (using tools/runner_finetune.py)', logger=logger)
+        if args.test:
+            # 분류 테스트 실행
+            classification_test_net(args, config)
+        else:
+            # 분류 학습(finetune) 실행
+            finetune_run_net(args, config, train_writer, val_writer)
+
     elif task_type == 'pretrain':
         # --- 사전학습 작업 ---
         print_log(f'Task: Pre-training (using tools/runner_pretrain.py)', logger=logger)
